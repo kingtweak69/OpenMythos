@@ -1,4 +1,4 @@
-r"""
+"""
 Chunkwise Triton kernels for GDN-2 (Gated DeltaNet 2).
 
 GDN-2 extends the gated delta rule with two independent channel-wise gates.
