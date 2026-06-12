@@ -1,16 +1,6 @@
 """OmniMythos v3 — dense backbone with interleaved Mamba3 + GDN2 recurrent core.
 
 Recurrent inner loop pattern: M3 → GDN2 → M3 → MLA → GDN2 → M3 → GDN2 → MLA
-
-Components:
-  - Mamba3Block: official mamba_ssm Mamba3 MIMO
-  - GDN2Block: official NVIDIA GatedDeltaNet2 from FLA
-  - MLA: DeepSeek-style multi-head latent attention
-  - SoftmaxAttention: standard MHA with RoPE
-  - HyperConnections, LTIInjection, LoopEmbedding, LoRADepthAdapter, ACTHalting
-  - ModalityBlock: cross-attention bridge for audio/vision encoders
-
-MoE upscale: swap make_ffn() return. Audio/image heads are plain Linear; swap at upscale time.
 """
 
 import math
@@ -23,35 +13,27 @@ from mamba_ssm.modules.mamba3 import Mamba3
 from gdn2 import GatedDeltaNet2
 
 
-# =============================================================================
-# Config
-# =============================================================================
-
 @dataclass
 class MythosConfig:
     vocab_size: int = 32000
     dim: int = 2048
     n_heads: int = 16
     max_seq_len: int = 1_000_000
-    # MLA
     kv_lora_rank: int = 512
     q_lora_rank: int = 1536
     qk_rope_head_dim: int = 64
     qk_nope_head_dim: int = 128
     v_head_dim: int = 128
-    # structure
     prelude_attn_layers: int = 4
     coda_attn_layers: int = 4
     max_loop_iters: int = 16
     act_threshold: float = 0.99
     hyper_n_streams: int = 4
-    # multimodal
     audio_vocab: int = 1024
     audio_n_codebooks: int = 8
     image_vocab: int = 8192
     audio_encoder_dim: int = 1280
     vision_encoder_dim: int = 1152
-    # misc
     rope_theta: float = 500000.0
     lora_rank: int = 16
     ffn_mult: float = 1.333
@@ -59,10 +41,6 @@ class MythosConfig:
     mamba_headdim: int = 64
     mamba_d_state: int = 128
 
-
-# =============================================================================
-# Basics
-# =============================================================================
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-6):
@@ -90,10 +68,6 @@ def make_ffn(cfg):
     return FFN(cfg.dim, int(cfg.dim * cfg.ffn_mult))
 
 
-# =============================================================================
-# RoPE
-# =============================================================================
-
 def precompute_freqs_cis(head_dim, max_len, theta):
     inv = 1.0 / (theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
     t = torch.arange(max_len).float()
@@ -107,10 +81,6 @@ def apply_rope(x, freqs_cis):
     xc = xc * freqs_cis.view(1, 1, T, D // 2)
     return torch.view_as_real(xc).reshape(B, H, T, D).to(x.dtype)
 
-
-# =============================================================================
-# Attention blocks
-# =============================================================================
 
 class SoftmaxAttention(nn.Module):
     def __init__(self, cfg):
@@ -200,10 +170,6 @@ class MLADenseBlock(nn.Module):
         return x
 
 
-# =============================================================================
-# Mamba3 block
-# =============================================================================
-
 class Mamba3Block(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -214,8 +180,7 @@ class Mamba3Block(nn.Module):
             headdim=cfg.mamba_headdim,
             expand=1,
             ngroups=1,
-            is_mimo=True,
-            mimo_rank=4,
+            is_mimo=False,
             chunk_size=64,
         )
         self.norm2 = RMSNorm(cfg.dim)
@@ -226,10 +191,6 @@ class Mamba3Block(nn.Module):
         x = x + self.ffn(self.norm2(x))
         return x
 
-
-# =============================================================================
-# GDN2 block (official GatedDeltaNet2)
-# =============================================================================
 
 class GDN2Block(nn.Module):
     def __init__(self, cfg):
@@ -249,10 +210,6 @@ class GDN2Block(nn.Module):
         x = x + self.ffn(self.norm2(x))
         return x
 
-
-# =============================================================================
-# Recurrent-depth machinery
-# =============================================================================
 
 class HyperConnections(nn.Module):
     def __init__(self, dim, n_streams):
@@ -333,22 +290,18 @@ class ACTHalting(nn.Module):
         return torch.sigmoid(self.halt(h)).squeeze(-1)
 
 
-# =============================================================================
-# Recurrent core — M3 → GDN2 → M3 → MLA → GDN2 → M3 → GDN2 → MLA
-# =============================================================================
-
 class RecurrentDenseBlock(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
 
-        self.m3_0    = Mamba3Block(cfg)
-        self.gdn_0   = GDN2Block(cfg)
-        self.m3_1    = Mamba3Block(cfg)
-        self.mla_mid = MLADenseBlock(cfg)
-        self.gdn_1   = GDN2Block(cfg)
-        self.m3_2    = Mamba3Block(cfg)
-        self.gdn_2   = GDN2Block(cfg)
+        self.m3_0     = Mamba3Block(cfg)
+        self.gdn_0    = GDN2Block(cfg)
+        self.m3_1     = Mamba3Block(cfg)
+        self.mla_mid  = MLADenseBlock(cfg)
+        self.gdn_1    = GDN2Block(cfg)
+        self.m3_2     = Mamba3Block(cfg)
+        self.gdn_2    = GDN2Block(cfg)
         self.mla_exit = MLADenseBlock(cfg)
 
         self.hyper     = HyperConnections(cfg.dim, cfg.hyper_n_streams)
@@ -403,10 +356,6 @@ class RecurrentDenseBlock(nn.Module):
         return h_out.to(e.dtype)
 
 
-# =============================================================================
-# Multimodal bridges
-# =============================================================================
-
 class CrossAttention(nn.Module):
     def __init__(self, dim, encoder_dim, n_heads):
         super().__init__()
@@ -441,22 +390,23 @@ class ModalityBlock(nn.Module):
         return x
 
 
-# =============================================================================
-# Full model
-# =============================================================================
-
 class OmniMythosDense(nn.Module):
     def __init__(self, cfg: MythosConfig):
         super().__init__()
         self.cfg   = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.dim)
 
+        # Modality encoders (prelude cross-attention)
         self.audio_encoder  = ModalityBlock(cfg, cfg.audio_encoder_dim)
         self.vision_encoder = ModalityBlock(cfg, cfg.vision_encoder_dim)
 
         self.prelude_attn = nn.ModuleList([SoftmaxBlock(cfg) for _ in range(cfg.prelude_attn_layers)])
         self.recurrent    = RecurrentDenseBlock(cfg)
         self.coda_attn    = nn.ModuleList([SoftmaxBlock(cfg) for _ in range(cfg.coda_attn_layers)])
+
+        # Modality decoders (coda cross-attention)
+        self.audio_decoder  = ModalityBlock(cfg, cfg.audio_encoder_dim)
+        self.vision_decoder = ModalityBlock(cfg, cfg.vision_encoder_dim)
 
         self.norm_f  = RMSNorm(cfg.dim)
         self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
@@ -504,6 +454,11 @@ class OmniMythosDense(nn.Module):
 
         for blk in self.coda_attn:
             x = blk(x, fs)
+
+        if audio_features is not None:
+            x = self.audio_decoder(x, audio_features)
+        if vision_features is not None:
+            x = self.vision_decoder(x, vision_features)
 
         x = self.norm_f(x)
         return self.lm_head(x), self.audio_head(x), self.image_head(x)
