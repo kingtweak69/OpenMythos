@@ -39,11 +39,11 @@ class Mamba3(nn.Module):
         dt_init_floor=1e-4,
         A_floor=1e-4,
         is_outproj_norm=False,
-        is_mimo=False,
+        is_mimo=True,
         mimo_rank=4,
         #-------------------------------------------
         # Fused kernel and sharding options
-        chunk_size=64, # Recommended: 64 for SISO, 64/mimo_rank for MIMO
+        chunk_size=16, # Recommended: 64 for SISO, 64/mimo_rank for MIMO
         dropout=0.0,  # Just to absorb the kwarg
         layer_idx=None,  # Absorb kwarg for general module
         n_layer=None,  # Absorb kwarg for general module
